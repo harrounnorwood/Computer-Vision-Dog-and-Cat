@@ -474,6 +474,13 @@
             response.headers.get("content-type") || "";
 
         if (!contentType.includes("application/json")) {
+            if (response.status === 502 || response.status === 503) {
+                throw new Error(
+                    "The online model is waking up or has run out of memory. " +
+                    "Please wait 30 seconds and try the image again."
+                );
+            }
+
             throw new Error(
                 "The server returned an unexpected response. " +
                 "Please check the Flask terminal."

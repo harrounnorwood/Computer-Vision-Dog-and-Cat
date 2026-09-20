@@ -98,24 +98,18 @@ if len(reference_features) != len(reference_labels):
 if n_neighbors > len(reference_features):
     raise ValueError("The number of neighbors exceeds the reference images.")
 
-# The classifier contains the same frozen ImageNet MobileNetV2 backbone used to
-# create the similarity profile. This submodel returns its 1,280 features.
-feature_extractor = tf.keras.Model(
-    inputs=classification_model.input,
-    outputs=classification_model.get_layer("global_average_pooling2d").output,
-    name="similarity_feature_extractor",
-)
-
+# Use one graph for both outputs. This avoids keeping a separate Keras submodel
+# around on the small Render Free instance.
 inference_model = tf.keras.Model(
     inputs=classification_model.input,
     outputs=[
-        feature_extractor.output,
+        classification_model.get_layer("global_average_pooling2d").output,
         classification_model.output,
     ],
     name="cat_dog_inference_model",
 )
 
-if int(feature_extractor.output_shape[-1]) != int(reference_features.shape[1]):
+if int(inference_model.output_shape[0][-1]) != int(reference_features.shape[1]):
     raise ValueError(
         "Classifier feature size does not match the similarity profile."
     )
