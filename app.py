@@ -38,6 +38,9 @@ load_dotenv(BASE_DIR / ".env")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
 
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
+
 
 # -----------------------------------------------------------------------------
 # Load the trained classifier and similarity profile once when Flask starts
@@ -101,6 +104,15 @@ feature_extractor = tf.keras.Model(
     inputs=classification_model.input,
     outputs=classification_model.get_layer("global_average_pooling2d").output,
     name="similarity_feature_extractor",
+)
+
+inference_model = tf.keras.Model(
+    inputs=classification_model.input,
+    outputs=[
+        feature_extractor.output,
+        classification_model.output,
+    ],
+    name="cat_dog_inference_model",
 )
 
 if int(feature_extractor.output_shape[-1]) != int(reference_features.shape[1]):
@@ -205,13 +217,8 @@ def prepare_image(image_bytes: bytes) -> tuple[Image.Image, np.ndarray]:
     return resized_image, processed_batch
 
 
-def calculate_similarity(processed_batch: np.ndarray) -> dict:
+def calculate_similarity(extracted_features: np.ndarray) -> dict:
     """Calculate the original V4 KNN cosine-similarity validation results."""
-
-    extracted_features = feature_extractor.predict(
-        processed_batch,
-        verbose=0,
-    )[0]
 
     distances, indexes = neighbor_model.kneighbors(
         extracted_features.reshape(1, -1)
@@ -243,12 +250,10 @@ def calculate_similarity(processed_batch: np.ndarray) -> dict:
     }
 
 
-def classify_cat_or_dog(processed_batch: np.ndarray) -> dict:
-    """Use the H5 model after the image passes similarity validation."""
+def classify_cat_or_dog(dog_probability: float) -> dict:
+    """Format the H5 model probability after similarity validation passes."""
 
-    dog_probability = float(
-        classification_model.predict(processed_batch, verbose=0)[0][0]
-    )
+    dog_probability = float(dog_probability)
     cat_probability = 1.0 - dog_probability
 
     if dog_probability >= 0.5:
@@ -264,6 +269,20 @@ def classify_cat_or_dog(processed_batch: np.ndarray) -> dict:
         "cat_probability": cat_probability,
         "dog_probability": dog_probability,
     }
+
+
+def run_inference(processed_batch: np.ndarray) -> tuple[dict, dict]:
+    """Run feature extraction and classification together in one pass."""
+
+    extracted_features, classifier_output = inference_model.predict(
+        processed_batch,
+        verbose=0,
+    )
+
+    similarity_result = calculate_similarity(extracted_features[0])
+    classification_result = classify_cat_or_dog(classifier_output[0][0])
+
+    return similarity_result, classification_result
 
 
 def create_builtin_explanation(result: dict) -> str:
@@ -418,7 +437,7 @@ def predict():
         image_bytes = uploaded_file.read()
         resized_image, processed_batch = prepare_image(image_bytes)
 
-        similarity_result = calculate_similarity(processed_batch)
+        similarity_result, classification_result = run_inference(processed_batch)
         passed_similarity = (
             similarity_result["similarity"] >= similarity_threshold
         )
@@ -451,8 +470,6 @@ def predict():
 
         # The classifier is intentionally called only after validation passes.
         if passed_similarity:
-            classification_result = classify_cat_or_dog(processed_batch)
-
             response_result.update(
                 prediction=classification_result["prediction"],
                 confidence=round(
